@@ -166,6 +166,11 @@
     return [NSURL fileURLWithPath:outputPath];
 }
 
+- (void)removeVideoFile {
+    [self removeTempFilePath:_videoWriter.outputURL.path];
+    self.videoURL = nil;
+}
+
 - (void)removeTempFilePath:(NSString*)filePath
 {
     NSFileManager* fileManager = [NSFileManager defaultManager];
@@ -192,22 +197,27 @@
                     });
                 };
                 
-                if (self.videoURL) {
+                if (!self.saveToAssetsLibrary) {
                     completion();
                 } else {
-                    ALAssetsLibrary *library = [[ALAssetsLibrary alloc] init];
-                    [library writeVideoAtPathToSavedPhotosAlbum:_videoWriter.outputURL completionBlock:^(NSURL *assetURL, NSError *error) {
-                        if (error) {
-                            NSLog(@"Error copying video to camera roll:%@", [error localizedDescription]);
-                        } else {
-                            [self removeTempFilePath:_videoWriter.outputURL.path];
-                            completion();
-                        }
-                    }];
+                    [self storeVideoInAssetsLibraryWithCompletion:completion];
                 }
             }];
         });
     });
+}
+
+- (void)storeVideoInAssetsLibraryWithCompletion:(void(^)())completion {
+    ALAssetsLibrary *library = [[ALAssetsLibrary alloc] init];
+    [library writeVideoAtPathToSavedPhotosAlbum:_videoWriter.outputURL completionBlock:^(NSURL *assetURL, NSError *error) {
+        if (error) {
+            NSLog(@"Error copying video to camera roll:%@", [error localizedDescription]);
+        } else {
+            if (completion) {
+                completion();
+            }
+        }
+    }];
 }
 
 - (void)cleanup
@@ -248,7 +258,10 @@
         dispatch_sync(dispatch_get_main_queue(), ^{
             UIGraphicsPushContext(bitmapContext); {
                 for (UIWindow *window in [[UIApplication sharedApplication] windows]) {
-                    [window drawViewHierarchyInRect:CGRectMake(0, 0, _viewSize.width, _viewSize.height) afterScreenUpdates:NO];
+                    if ([window isHidden]) {
+                        continue;
+                    }
+                    [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:NO];
                 }
             } UIGraphicsPopContext();
         });
