@@ -16,13 +16,17 @@ typedef void (^VideoCompletionBlock)(void);
 // delegate is only required when implementing ASScreenRecorderDelegate - see below
 @property (nonatomic, weak) id <ASScreenRecorderDelegate> delegate;
 
-// if saveURL is nil, video will be saved into camera roll
 // this property can not be changed whilst recording is in progress
 @property (strong, nonatomic) NSURL *videoURL;
+
+// if saveToAssetsLibrary is YES, video will be saved into camera roll after recording is finished
+@property(nonatomic) BOOL saveToAssetsLibrary;
 
 + (instancetype)sharedInstance;
 - (BOOL)startRecording;
 - (void)stopRecordingWithCompletion:(VideoCompletionBlock)completionBlock;
+- (void)storeVideoInAssetsLibraryWithCompletion:(void(^)())completion;
+- (void)removeVideoFile;
 @end
 
 
