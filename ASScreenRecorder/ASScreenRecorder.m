@@ -261,7 +261,12 @@
                     if ([window isHidden]) {
                         continue;
                     }
-                    [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:NO];
+                    if ([window respondsToSelector:@selector(drawViewHierarchyInRect:afterScreenUpdates:)]) {
+                        [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:NO];
+                    } else {
+                        CALayer *rootLayer = window.rootViewController.view.layer;
+                        [rootLayer renderInContext:bitmapContext];
+                    }
                 }
             } UIGraphicsPopContext();
         });
