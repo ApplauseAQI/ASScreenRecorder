@@ -7,11 +7,24 @@
 //
 
 #import <Foundation/Foundation.h>
+
+typedef NS_ENUM(NSUInteger, ASSScreenRecorderVideoQuality) {
+    ASSScreenRecorderVideoQualityVeryLow = 0,
+    ASSScreenRecorderVideoQualityLow = 1,
+    ASSScreenRecorderVideoQualityMedium = 2,
+    ASSScreenRecorderVideoQualityHigh = 4,
+    ASSScreenRecorderVideoQualityVeryHigh = 8,
+};
+
 typedef void (^VideoCompletionBlock)(void);
+
 @protocol ASScreenRecorderDelegate;
 
 @interface ASScreenRecorder : NSObject
+
 @property (nonatomic, readonly) BOOL isRecording;
+
+@property (nonatomic) ASSScreenRecorderVideoQuality videoQuality;
 
 // delegate is only required when implementing ASScreenRecorderDelegate - see below
 @property (nonatomic, weak) id <ASScreenRecorderDelegate> delegate;
@@ -24,6 +37,7 @@ typedef void (^VideoCompletionBlock)(void);
 
 + (instancetype)sharedInstance;
 - (BOOL)startRecording;
+- (BOOL)startRecordingWithQuality:(ASSScreenRecorderVideoQuality)quality;
 - (void)stopRecordingWithCompletion:(VideoCompletionBlock)completionBlock;
 - (void)storeVideoInAssetsLibraryWithCompletion:(void(^)())completion;
 - (void)removeVideoFile;

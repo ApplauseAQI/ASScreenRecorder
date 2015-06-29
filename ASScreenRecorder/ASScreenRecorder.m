@@ -50,12 +50,9 @@
 {
     self = [super init];
     if (self) {
+        _videoQuality = ASSScreenRecorderVideoQualityMedium;
         _viewSize = [UIApplication sharedApplication].delegate.window.bounds.size;
         _scale = [UIScreen mainScreen].scale;
-        // record half size resolution for retina iPads
-        if ((UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) && _scale > 1) {
-            _scale = 1.0;
-        }
         _isRecording = NO;
         
         _append_pixelBuffer_queue = dispatch_queue_create("ASScreenRecorder.append_queue", DISPATCH_QUEUE_SERIAL);
@@ -84,6 +81,11 @@
         [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
     return _isRecording;
+}
+
+- (BOOL)startRecordingWithQuality:(ASSScreenRecorderVideoQuality)quality {
+    self.videoQuality = quality;
+    return [self startRecording];
 }
 
 - (void)stopRecordingWithCompletion:(VideoCompletionBlock)completionBlock;
@@ -118,13 +120,32 @@
                                                 error:&error];
     NSParameterAssert(_videoWriter);
     
-    NSInteger pixelNumber = _viewSize.width * _viewSize.height * _scale;
-    NSDictionary* videoCompression = @{AVVideoAverageBitRateKey: @(pixelNumber * 11.4)};
+    CGFloat videoQualityBitrateFactor;
+    switch (self.videoQuality) {
+        case ASSScreenRecorderVideoQualityVeryLow: {
+            videoQualityBitrateFactor = 0.5;
+            break;
+        }
+        default: {
+            videoQualityBitrateFactor = (CGFloat)self.videoQuality;
+            break;
+        }
+    }
+    NSInteger pixelNumber = _viewSize.width * _viewSize.height * pow(_scale, 2);
+    NSDictionary* videoCompression = @{
+                                       AVVideoAverageBitRateKey: @(pixelNumber * videoQualityBitrateFactor),
+                                       AVVideoMaxKeyFrameIntervalKey: @(300),
+                                       AVVideoProfileLevelKey: AVVideoProfileLevelH264BaselineAutoLevel,
+                                       AVVideoExpectedSourceFrameRateKey: @(30),
+                                       AVVideoAverageNonDroppableFrameRateKey: @(30),
+                                       };
     
-    NSDictionary* videoSettings = @{AVVideoCodecKey: AVVideoCodecH264,
+    NSDictionary* videoSettings = @{
+                                    AVVideoCodecKey: AVVideoCodecH264,
                                     AVVideoWidthKey: [NSNumber numberWithInt:_viewSize.width*_scale],
                                     AVVideoHeightKey: [NSNumber numberWithInt:_viewSize.height*_scale],
-                                    AVVideoCompressionPropertiesKey: videoCompression};
+                                    AVVideoCompressionPropertiesKey: videoCompression,
+                                    };
     
     _videoWriterInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:videoSettings];
     NSParameterAssert(_videoWriterInput);
