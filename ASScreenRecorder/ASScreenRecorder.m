@@ -115,10 +115,16 @@
     
     
     NSError* error = nil;
-    _videoWriter = [[AVAssetWriter alloc] initWithURL:self.videoURL ?: [self tempFileURL]
+    NSURL *fileURL = self.videoURL ?: [self tempFileURL];
+    _videoWriter = [[AVAssetWriter alloc] initWithURL:fileURL
                                              fileType:AVFileTypeQuickTimeMovie
                                                 error:&error];
     NSParameterAssert(_videoWriter);
+    error = nil;
+    NSDictionary *fileProtectionAttribute = @{
+        NSFileProtectionKey: NSFileProtectionNone,
+    };
+    [[NSFileManager defaultManager] setAttributes:fileProtectionAttribute ofItemAtPath:fileURL.path error:&error];
     
     CGFloat videoQualityBitrateFactor;
     switch (self.videoQuality) {
@@ -254,6 +260,9 @@
 
 - (void)writeVideoFrame
 {
+    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+        return;
+    }
     // throttle the number of frames to prevent meltdown
     // technique gleaned from Brad Larson's answer here: http://stackoverflow.com/a/5956119
     if (dispatch_semaphore_wait(_frameRenderingSemaphore, DISPATCH_TIME_NOW) != 0) {
