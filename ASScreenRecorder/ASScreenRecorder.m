@@ -7,7 +7,6 @@
 //
 
 #import "ASScreenRecorder.h"
-#import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/QuartzCore.h>
 #import <AssetsLibrary/AssetsLibrary.h>
 
@@ -211,24 +210,26 @@
     return videoTransform;
 }
 
-- (NSURL*)tempFileURL
+- (NSURL *)tempFileURL
 {
-    NSString *outputPath = [NSHomeDirectory() stringByAppendingPathComponent:@"tmp/screenCapture.mp4"];
-    [self removeTempFilePath:outputPath];
-    return [NSURL fileURLWithPath:outputPath];
+    NSURL *outputURL = [NSURL fileURLWithPath:[NSHomeDirectory() stringByAppendingPathComponent:@"tmp/screenCapture.mp4"]];
+    [self removeTempFilePath:outputURL];
+    return outputURL;
 }
 
 - (void)removeVideoFile {
-    [self removeTempFilePath:self.videoWriter.outputURL.path];
+    [self removeTempFilePath:self.videoWriter.outputURL];
     self.videoURL = nil;
 }
 
-- (void)removeTempFilePath:(NSString*)filePath
+- (void)removeTempFilePath:(NSURL *)fileURL
 {
+    NSString *filePath = fileURL.path;
     if ([self.fileManager fileExistsAtPath:filePath]) {
         NSError* error;
-        if ([self.fileManager removeItemAtPath:filePath error:&error] == NO) {
-            NSLog(@"Could not delete old recording:%@", [error localizedDescription]);
+        if ([self.fileManager removeItemAtPath:filePath error:&error] == NO &&
+            [self.delegate respondsToSelector:@selector(screenRecorder:didFailToRemoveFileAtPath:withError:)]) {
+            [self.delegate screenRecorder:self didFailToRemoveFileAtPath:fileURL withError:error];
         }
     }
 }
@@ -261,8 +262,8 @@
 - (void)storeVideoInAssetsLibraryWithCompletion:(void(^)())completion {
     ALAssetsLibrary *library = [[ALAssetsLibrary alloc] init];
     [library writeVideoAtPathToSavedPhotosAlbum:self.videoWriter.outputURL completionBlock:^(NSURL *assetURL, NSError *error) {
-        if (error) {
-            NSLog(@"Error copying video to camera roll:%@", [error localizedDescription]);
+        if (error && [self.delegate respondsToSelector:@selector(screenRecorder:didFailToSaveVideoToCameraRoll:withError:)]) {
+            [self.delegate screenRecorder:self didFailToSaveVideoToCameraRoll:self.videoWriter.outputURL withError:error];
         } else {
             if (completion) {
                 completion();
@@ -356,8 +357,8 @@
 
 - (void)drawInBitmapContext:(CGContextRef)bitmapContext {
     if (self.application.applicationState == UIApplicationStateActive) {
-        if (self.delegate) {
-            [self.delegate writeBackgroundFrameInContext:&bitmapContext];
+		if ([self.dataSource respondsToSelector:@selector(screenRecorder:requestToDrawInContext:)]) {
+            [self.dataSource screenRecorder:self requestToDrawInContext:&bitmapContext];
         }
         [self drawCurrentScreenInBitmapContext:bitmapContext];
     } else {
@@ -392,7 +393,16 @@
     backgroundLabel.textColor = [UIColor whiteColor];
     backgroundLabel.textAlignment = NSTextAlignmentCenter;
     backgroundLabel.numberOfLines = 0;
-    backgroundLabel.text = @"Application did enter background";
+    
+    NSString *labelText;
+    if ([self.dataSource respondsToSelector:@selector(screenRecorderTextForBackgroundFrame:)]) {
+        labelText = [self.dataSource screenRecorderTextForBackgroundFrame:self];
+    }
+    if (labelText == nil) {
+        labelText = @"Application did enter background";
+    }
+    
+    backgroundLabel.text = labelText;
     return backgroundLabel;
 }
 
@@ -407,9 +417,9 @@
 
 - (void)handlePixelBuffer:(CVPixelBufferRef)pixelBuffer withPresentationTime:(CMTime)time {
     BOOL success = [self.avAdaptor appendPixelBuffer:pixelBuffer withPresentationTime:time];
-    if (!success) {
-        NSLog(@"Warning: Unable to write buffer to video");
-    }
+	if (!success && [self.delegate respondsToSelector:@selector(screenRecorder:didFailToWriteBufferToVideoWriter:withError:)]) {
+		[self.delegate screenRecorder:self didFailToWriteBufferToVideoWriter:self.videoWriter withError:self.videoWriter.error];
+	}
 }
 
 - (void)cleanupBitmapContext:(CGContextRef)bitmapContext andPixelBuffer:(CVPixelBufferRef)pixelBuffer {
