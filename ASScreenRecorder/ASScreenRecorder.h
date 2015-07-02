@@ -35,6 +35,12 @@ typedef void (^VideoCompletionBlock)(void);
 // if saveToAssetsLibrary is YES, video will be saved into camera roll after recording is finished
 @property(nonatomic) BOOL saveToAssetsLibrary;
 
+@property(nonatomic, strong) UIApplication *application;
+@property(nonatomic, strong) UIScreen *screen;
+@property(nonatomic, strong) NSFileManager *fileManager;
+@property(nonatomic, strong) UIDevice *device;
+@property(nonatomic, strong) NSRunLoop *runLoop;
+
 + (instancetype)sharedInstance;
 - (BOOL)startRecording;
 - (BOOL)startRecordingWithQuality:(ASSScreenRecorderVideoQuality)quality;

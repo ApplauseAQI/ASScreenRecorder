@@ -49,8 +49,15 @@
     self = [super init];
     if (self) {
         _videoQuality = ASSScreenRecorderVideoQualityMedium;
-        CGSize viewSize = [UIApplication sharedApplication].delegate.window.bounds.size;
-        CGFloat scale = [UIScreen mainScreen].scale;
+        
+        _application = [UIApplication sharedApplication];
+        _screen = [UIScreen mainScreen];
+        _fileManager = [NSFileManager defaultManager];
+        _device = [UIDevice currentDevice];
+        _runLoop = [NSRunLoop mainRunLoop];
+        
+        CGSize viewSize = self.application.delegate.window.bounds.size;
+        CGFloat scale = self.screen.scale;
         _bufferSize = CGSizeMake(viewSize.width * scale, viewSize.height * scale);
         _isRecording = NO;
         
@@ -77,7 +84,7 @@
         [self setUpWriter];
         _isRecording = (_videoWriter.status == AVAssetWriterStatusWriting);
         _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(writeVideoFrame)];
-        [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        [_displayLink addToRunLoop:self.runLoop forMode:NSRunLoopCommonModes];
     }
     return _isRecording;
 }
@@ -91,7 +98,7 @@
 {
     if (_isRecording) {
         _isRecording = NO;
-        [_displayLink removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        [_displayLink removeFromRunLoop:self.runLoop forMode:NSRunLoopCommonModes];
         [self completeRecordingSession:completionBlock];
     }
 }
@@ -123,7 +130,7 @@
     NSDictionary *fileProtectionAttribute = @{
         NSFileProtectionKey: NSFileProtectionNone,
     };
-    [[NSFileManager defaultManager] setAttributes:fileProtectionAttribute ofItemAtPath:fileURL.path error:&error];
+    [self.fileManager setAttributes:fileProtectionAttribute ofItemAtPath:fileURL.path error:&error];
     
     CGFloat videoQualityBitrateFactor;
     switch (self.videoQuality) {
@@ -169,7 +176,7 @@
 - (CGAffineTransform)videoTransformForDeviceOrientation
 {
     CGAffineTransform videoTransform;
-    switch ([UIDevice currentDevice].orientation) {
+    switch (self.device.orientation) {
         case UIDeviceOrientationLandscapeLeft:
             videoTransform = CGAffineTransformMakeRotation(-M_PI_2);
             break;
@@ -199,10 +206,9 @@
 
 - (void)removeTempFilePath:(NSString*)filePath
 {
-    NSFileManager* fileManager = [NSFileManager defaultManager];
-    if ([fileManager fileExistsAtPath:filePath]) {
+    if ([self.fileManager fileExistsAtPath:filePath]) {
         NSError* error;
-        if ([fileManager removeItemAtPath:filePath error:&error] == NO) {
+        if ([self.fileManager removeItemAtPath:filePath error:&error] == NO) {
             NSLog(@"Could not delete old recording:%@", [error localizedDescription]);
         }
     }
@@ -276,7 +282,7 @@
         CVPixelBufferRef pixelBuffer = NULL;
         CGContextRef bitmapContext = [self createPixelBufferAndBitmapContext:&pixelBuffer];
         
-        if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
+        if (self.application.applicationState == UIApplicationStateActive) {
             if (self.delegate) {
                 [self.delegate writeBackgroundFrameInContext:&bitmapContext];
             }
@@ -284,7 +290,7 @@
             // FIX: UIKeyboard is currently only rendered correctly in portrait orientation
             dispatch_sync(dispatch_get_main_queue(), ^{
                 UIGraphicsPushContext(bitmapContext); {
-                    for (UIWindow *window in [[UIApplication sharedApplication] windows]) {
+                    for (UIWindow *window in [self.application windows]) {
                         if ([window isHidden]) {
                             continue;
                         }
@@ -334,7 +340,7 @@
 }
 
 - (UILabel *)prepareBackgroundLabel {
-    CGRect labelRect = [UIApplication sharedApplication].delegate.window.bounds;
+    CGRect labelRect = self.application.delegate.window.bounds;
     UILabel *backgroundLabel = [[UILabel alloc] initWithFrame:labelRect];
     backgroundLabel.backgroundColor = [UIColor blackColor];
     backgroundLabel.textColor = [UIColor whiteColor];
@@ -356,8 +362,8 @@
                                           8, CVPixelBufferGetBytesPerRow(*pixelBuffer), _rgbColorSpace,
                                           kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst
                                           );
-    CGFloat scale = [UIScreen mainScreen].scale;
-    CGSize viewSize = [UIApplication sharedApplication].delegate.window.bounds.size;
+    CGFloat scale = self.screen.scale;
+    CGSize viewSize = self.application.delegate.window.bounds.size;
     CGContextScaleCTM(bitmapContext, scale, scale);
     CGAffineTransform flipVertical = CGAffineTransformMake(1, 0, 0, -1, 0, viewSize.height);
     CGContextConcatCTM(bitmapContext, flipVertical);
