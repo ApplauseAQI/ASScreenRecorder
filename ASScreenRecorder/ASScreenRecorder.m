@@ -106,8 +106,21 @@
 
 -(void)setUpWriter
 {
-    _rgbColorSpace = CGColorSpaceCreateDeviceRGB();
+    self.rgbColorSpace = CGColorSpaceCreateDeviceRGB();
     
+    [self createPixelBufferPool];
+    [self prepareAssetsWriter];
+    [self createVideoWrighterInput];
+    
+    self.avAdaptor = [AVAssetWriterInputPixelBufferAdaptor assetWriterInputPixelBufferAdaptorWithAssetWriterInput:self.videoWriterInput sourcePixelBufferAttributes:nil];
+    
+    [self.videoWriter addInput:self.videoWriterInput];
+    
+    [self.videoWriter startWriting];
+    [self.videoWriter startSessionAtSourceTime:CMTimeMake(0, 1000)];
+}
+
+- (void)createPixelBufferPool {
     NSDictionary *bufferAttributes = @{(id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
                                        (id)kCVPixelBufferCGBitmapContextCompatibilityKey : @YES,
                                        (id)kCVPixelBufferWidthKey : @(self.bufferSize.width),
@@ -115,61 +128,68 @@
                                        (id)kCVPixelBufferBytesPerRowAlignmentKey : @(self.bufferSize.width * 4)
                                        };
     
-    _outputBufferPool = NULL;
+    self.outputBufferPool = NULL;
     CVPixelBufferPoolCreate(NULL, NULL, (__bridge CFDictionaryRef)(bufferAttributes), &_outputBufferPool);
-    
-    
+}
+
+- (void)prepareAssetsWriter {
     NSError* error = nil;
     NSURL *fileURL = self.videoURL ?: [self tempFileURL];
-    _videoWriter = [[AVAssetWriter alloc] initWithURL:fileURL
-                                             fileType:AVFileTypeQuickTimeMovie
-                                                error:&error];
-    NSParameterAssert(_videoWriter);
-    error = nil;
+    self.videoWriter = [[AVAssetWriter alloc] initWithURL:fileURL
+                                                 fileType:AVFileTypeQuickTimeMovie
+                                                    error:&error];
+    NSParameterAssert(self.videoWriter);
+    [self removeProtectionFromFile:fileURL];
+}
+
+- (void)removeProtectionFromFile:(NSURL *)fileURL {
+    NSError *error = nil;
     NSDictionary *fileProtectionAttribute = @{
         NSFileProtectionKey: NSFileProtectionNone,
     };
     [self.fileManager setAttributes:fileProtectionAttribute ofItemAtPath:fileURL.path error:&error];
+}
+
+- (void)createVideoWrighterInput {
+    self.videoWriterInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:[self videoSettings]];
+    NSParameterAssert(self.videoWriterInput);
     
-    CGFloat videoQualityBitrateFactor;
-    switch (self.videoQuality) {
-        case ASSScreenRecorderVideoQualityVeryLow: {
-            videoQualityBitrateFactor = 0.5;
-            break;
+    self.videoWriterInput.expectsMediaDataInRealTime = YES;
+    self.videoWriterInput.transform = [self videoTransformForDeviceOrientation];
+}
+
+- (NSDictionary *)videoSettings {
+    static NSDictionary* videoSettings;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        CGFloat videoQualityBitrateFactor;
+        switch (self.videoQuality) {
+            case ASSScreenRecorderVideoQualityVeryLow: {
+                videoQualityBitrateFactor = 0.5;
+                break;
+            }
+            default: {
+                videoQualityBitrateFactor = (CGFloat)self.videoQuality;
+                break;
+            }
         }
-        default: {
-            videoQualityBitrateFactor = (CGFloat)self.videoQuality;
-            break;
-        }
-    }
-    NSInteger pixelNumber = self.bufferSize.width * self.bufferSize.height;
-    NSDictionary* videoCompression = @{
-                                       AVVideoAverageBitRateKey: @(pixelNumber * videoQualityBitrateFactor),
-                                       AVVideoMaxKeyFrameIntervalKey: @(300),
-                                       AVVideoProfileLevelKey: AVVideoProfileLevelH264BaselineAutoLevel,
-                                       AVVideoExpectedSourceFrameRateKey: @(30),
-                                       AVVideoAverageNonDroppableFrameRateKey: @(30),
-                                       };
-    
-    NSDictionary* videoSettings = @{
-                                    AVVideoCodecKey: AVVideoCodecH264,
-                                    AVVideoWidthKey: @(self.bufferSize.width),
-                                    AVVideoHeightKey: @(self.bufferSize.height),
-                                    AVVideoCompressionPropertiesKey: videoCompression,
-                                    };
-    
-    _videoWriterInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:videoSettings];
-    NSParameterAssert(_videoWriterInput);
-    
-    _videoWriterInput.expectsMediaDataInRealTime = YES;
-    _videoWriterInput.transform = [self videoTransformForDeviceOrientation];
-    
-    _avAdaptor = [AVAssetWriterInputPixelBufferAdaptor assetWriterInputPixelBufferAdaptorWithAssetWriterInput:_videoWriterInput sourcePixelBufferAttributes:nil];
-    
-    [_videoWriter addInput:_videoWriterInput];
-    
-    [_videoWriter startWriting];
-    [_videoWriter startSessionAtSourceTime:CMTimeMake(0, 1000)];
+        NSInteger pixelNumber = self.bufferSize.width * self.bufferSize.height;
+        NSDictionary *videoCompression = @{
+            AVVideoAverageBitRateKey: @(pixelNumber * videoQualityBitrateFactor),
+            AVVideoMaxKeyFrameIntervalKey: @(300),
+            AVVideoProfileLevelKey: AVVideoProfileLevelH264BaselineAutoLevel,
+            AVVideoExpectedSourceFrameRateKey: @(30),
+            AVVideoAverageNonDroppableFrameRateKey: @(30),
+        };
+        
+        videoSettings = @{
+            AVVideoCodecKey: AVVideoCodecH264,
+            AVVideoWidthKey: @(self.bufferSize.width),
+            AVVideoHeightKey: @(self.bufferSize.height),
+            AVVideoCompressionPropertiesKey: videoCompression,
+        };
+    });
+    return videoSettings;
 }
 
 - (CGAffineTransform)videoTransformForDeviceOrientation
@@ -199,7 +219,7 @@
 }
 
 - (void)removeVideoFile {
-    [self removeTempFilePath:_videoWriter.outputURL.path];
+    [self removeTempFilePath:self.videoWriter.outputURL.path];
     self.videoURL = nil;
 }
 
@@ -215,11 +235,11 @@
 
 - (void)completeRecordingSession:(VideoCompletionBlock)completionBlock;
 {
-    dispatch_async(_render_queue, ^{
-        dispatch_sync(_append_pixelBuffer_queue, ^{
+    dispatch_async(self.render_queue, ^{
+        dispatch_sync(self.append_pixelBuffer_queue, ^{
             
-            [_videoWriterInput markAsFinished];
-            [_videoWriter finishWritingWithCompletionHandler:^{
+            [self.videoWriterInput markAsFinished];
+            [self.videoWriter finishWritingWithCompletionHandler:^{
                 
                 void (^completion)(void) = ^() {
                     [self cleanup];
@@ -240,7 +260,7 @@
 
 - (void)storeVideoInAssetsLibraryWithCompletion:(void(^)())completion {
     ALAssetsLibrary *library = [[ALAssetsLibrary alloc] init];
-    [library writeVideoAtPathToSavedPhotosAlbum:_videoWriter.outputURL completionBlock:^(NSURL *assetURL, NSError *error) {
+    [library writeVideoAtPathToSavedPhotosAlbum:self.videoWriter.outputURL completionBlock:^(NSURL *assetURL, NSError *error) {
         if (error) {
             NSLog(@"Error copying video to camera roll:%@", [error localizedDescription]);
         } else {
@@ -258,8 +278,8 @@
     self.videoWriter = nil;
     self.firstTimeStamp = 0;
     self.outputBufferPoolAuxAttributes = nil;
-    CGColorSpaceRelease(_rgbColorSpace);
-    CVPixelBufferPoolRelease(_outputBufferPool);
+    CGColorSpaceRelease(self.rgbColorSpace);
+    CVPixelBufferPoolRelease(self.outputBufferPool);
 }
 
 #pragma mark - Recording
