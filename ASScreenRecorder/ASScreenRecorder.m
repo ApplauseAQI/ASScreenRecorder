@@ -18,7 +18,7 @@
 @property (strong, nonatomic) CADisplayLink *displayLink;
 @property (strong, nonatomic) NSDictionary *outputBufferPoolAuxAttributes;
 @property (nonatomic) CFTimeInterval firstTimeStamp;
-@property (nonatomic) BOOL isRecording;
+@property (nonatomic, readwrite) BOOL isRecording;
 @property (nonatomic) CGSize bufferSize;
 @end
 
