@@ -79,13 +79,13 @@
 
 - (BOOL)startRecording
 {
-    if (!_isRecording) {
+    if (!self.isRecording) {
         [self setUpWriter];
-        _isRecording = (_videoWriter.status == AVAssetWriterStatusWriting);
-        _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(writeVideoFrame)];
-        [_displayLink addToRunLoop:self.runLoop forMode:NSRunLoopCommonModes];
+        self.isRecording = (self.videoWriter.status == AVAssetWriterStatusWriting);
+        self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(writeVideoFrame)];
+        [self.displayLink addToRunLoop:self.runLoop forMode:NSRunLoopCommonModes];
     }
-    return _isRecording;
+    return self.isRecording;
 }
 
 - (BOOL)startRecordingWithQuality:(ASSScreenRecorderVideoQuality)quality {
@@ -95,9 +95,9 @@
 
 - (void)stopRecordingWithCompletion:(VideoCompletionBlock)completionBlock;
 {
-    if (_isRecording) {
-        _isRecording = NO;
-        [_displayLink removeFromRunLoop:self.runLoop forMode:NSRunLoopCommonModes];
+    if (self.isRecording) {
+        self.isRecording = NO;
+        [self.displayLink removeFromRunLoop:self.runLoop forMode:NSRunLoopCommonModes];
         [self completeRecordingSession:completionBlock];
     }
 }
