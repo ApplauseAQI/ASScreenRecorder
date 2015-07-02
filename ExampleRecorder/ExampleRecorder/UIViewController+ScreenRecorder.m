@@ -18,18 +18,38 @@
     tapGesture.numberOfTapsRequired = 2;
     tapGesture.delaysTouchesBegan = YES;
     [self.view addGestureRecognizer:tapGesture];
+    ASScreenRecorder *recorder = [ASScreenRecorder sharedInstance];
+    recorder.saveToAssetsLibrary = YES;
 }
 
 - (void)recorderGesture:(UIGestureRecognizer *)recognizer
 {
     ASScreenRecorder *recorder = [ASScreenRecorder sharedInstance];
+    static UIBackgroundTaskIdentifier task;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        task = UIBackgroundTaskInvalid;
+    });
+    
+    void(^endBackgroundTask)() = ^{
+        if (task != UIBackgroundTaskInvalid) {
+            [[UIApplication sharedApplication] endBackgroundTask:task];
+            task = UIBackgroundTaskInvalid;
+        }
+    };
     
     if (recorder.isRecording) {
         [recorder stopRecordingWithCompletion:^{
             NSLog(@"Finished recording");
             [self playEndSound];
+            endBackgroundTask();
         }];
     } else {
+        [[UIApplication sharedApplication] beginBackgroundTaskWithExpirationHandler:^{
+            [recorder stopRecordingWithCompletion:^{
+                endBackgroundTask();
+            }];
+        }];
         [recorder startRecording];
         NSLog(@"Start recording");
         [self playStartSound];

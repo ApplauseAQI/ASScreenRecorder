@@ -12,28 +12,25 @@
 #import <AssetsLibrary/AssetsLibrary.h>
 
 @interface ASScreenRecorder()
-@property (strong, nonatomic) AVAssetWriter *videoWriter;
-@property (strong, nonatomic) AVAssetWriterInput *videoWriterInput;
-@property (strong, nonatomic) AVAssetWriterInputPixelBufferAdaptor *avAdaptor;
-@property (strong, nonatomic) CADisplayLink *displayLink;
-@property (strong, nonatomic) NSDictionary *outputBufferPoolAuxAttributes;
-@property (nonatomic) CFTimeInterval firstTimeStamp;
-@property (nonatomic) BOOL isRecording;
+
+@property(strong, nonatomic) AVAssetWriter *videoWriter;
+@property(strong, nonatomic) AVAssetWriterInput *videoWriterInput;
+@property(strong, nonatomic) AVAssetWriterInputPixelBufferAdaptor *avAdaptor;
+@property(strong, nonatomic) CADisplayLink *displayLink;
+@property(strong, nonatomic) NSDictionary *outputBufferPoolAuxAttributes;
+@property(nonatomic) CFTimeInterval firstTimeStamp;
+@property(nonatomic, readwrite) BOOL isRecording;
+@property(nonatomic) CGSize bufferSize;
+@property(nonatomic) dispatch_queue_t render_queue;
+@property(nonatomic) dispatch_queue_t append_pixelBuffer_queue;
+@property(nonatomic) dispatch_semaphore_t frameRenderingSemaphore;
+@property(nonatomic) dispatch_semaphore_t pixelAppendSemaphore;
+@property(nonatomic) CGColorSpaceRef rgbColorSpace;
+@property(nonatomic) CVPixelBufferPoolRef outputBufferPool;
+
 @end
 
 @implementation ASScreenRecorder
-{
-    dispatch_queue_t _render_queue;
-    dispatch_queue_t _append_pixelBuffer_queue;
-    dispatch_semaphore_t _frameRenderingSemaphore;
-    dispatch_semaphore_t _pixelAppendSemaphore;
-    
-    CGSize _viewSize;
-    CGFloat _scale;
-    
-    CGColorSpaceRef _rgbColorSpace;
-    CVPixelBufferPoolRef _outputBufferPool;
-}
 
 #pragma mark - initializers
 
@@ -51,8 +48,16 @@
     self = [super init];
     if (self) {
         _videoQuality = ASSScreenRecorderVideoQualityMedium;
-        _viewSize = [UIApplication sharedApplication].delegate.window.bounds.size;
-        _scale = [UIScreen mainScreen].scale;
+        
+        _application = [UIApplication sharedApplication];
+        _screen = [UIScreen mainScreen];
+        _fileManager = [NSFileManager defaultManager];
+        _device = [UIDevice currentDevice];
+        _runLoop = [NSRunLoop mainRunLoop];
+        
+        CGSize viewSize = self.application.delegate.window.bounds.size;
+        CGFloat scale = self.screen.scale;
+        _bufferSize = CGSizeMake(viewSize.width * scale, viewSize.height * scale);
         _isRecording = NO;
         
         _append_pixelBuffer_queue = dispatch_queue_create("ASScreenRecorder.append_queue", DISPATCH_QUEUE_SERIAL);
@@ -74,13 +79,13 @@
 
 - (BOOL)startRecording
 {
-    if (!_isRecording) {
+    if (!self.isRecording) {
         [self setUpWriter];
-        _isRecording = (_videoWriter.status == AVAssetWriterStatusWriting);
-        _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(writeVideoFrame)];
-        [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        self.isRecording = (self.videoWriter.status == AVAssetWriterStatusWriting);
+        self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(writeVideoFrame)];
+        [self.displayLink addToRunLoop:self.runLoop forMode:NSRunLoopCommonModes];
     }
-    return _isRecording;
+    return self.isRecording;
 }
 
 - (BOOL)startRecordingWithQuality:(ASSScreenRecorderVideoQuality)quality {
@@ -90,9 +95,9 @@
 
 - (void)stopRecordingWithCompletion:(VideoCompletionBlock)completionBlock;
 {
-    if (_isRecording) {
-        _isRecording = NO;
-        [_displayLink removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    if (self.isRecording) {
+        self.isRecording = NO;
+        [self.displayLink removeFromRunLoop:self.runLoop forMode:NSRunLoopCommonModes];
         [self completeRecordingSession:completionBlock];
     }
 }
@@ -101,70 +106,96 @@
 
 -(void)setUpWriter
 {
-    _rgbColorSpace = CGColorSpaceCreateDeviceRGB();
+    self.rgbColorSpace = CGColorSpaceCreateDeviceRGB();
     
+    [self createPixelBufferPool];
+    [self prepareAssetsWriter];
+    [self createVideoWrighterInput];
+    
+    self.avAdaptor = [AVAssetWriterInputPixelBufferAdaptor assetWriterInputPixelBufferAdaptorWithAssetWriterInput:self.videoWriterInput sourcePixelBufferAttributes:nil];
+    
+    [self.videoWriter addInput:self.videoWriterInput];
+    
+    [self.videoWriter startWriting];
+    [self.videoWriter startSessionAtSourceTime:CMTimeMake(0, 1000)];
+}
+
+- (void)createPixelBufferPool {
     NSDictionary *bufferAttributes = @{(id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
                                        (id)kCVPixelBufferCGBitmapContextCompatibilityKey : @YES,
-                                       (id)kCVPixelBufferWidthKey : @(_viewSize.width * _scale),
-                                       (id)kCVPixelBufferHeightKey : @(_viewSize.height * _scale),
-                                       (id)kCVPixelBufferBytesPerRowAlignmentKey : @(_viewSize.width * _scale * 4)
+                                       (id)kCVPixelBufferWidthKey : @(self.bufferSize.width),
+                                       (id)kCVPixelBufferHeightKey : @(self.bufferSize.height),
+                                       (id)kCVPixelBufferBytesPerRowAlignmentKey : @(self.bufferSize.width * 4)
                                        };
     
-    _outputBufferPool = NULL;
+    self.outputBufferPool = NULL;
     CVPixelBufferPoolCreate(NULL, NULL, (__bridge CFDictionaryRef)(bufferAttributes), &_outputBufferPool);
-    
-    
+}
+
+- (void)prepareAssetsWriter {
     NSError* error = nil;
-    _videoWriter = [[AVAssetWriter alloc] initWithURL:self.videoURL ?: [self tempFileURL]
-                                             fileType:AVFileTypeQuickTimeMovie
-                                                error:&error];
-    NSParameterAssert(_videoWriter);
+    NSURL *fileURL = self.videoURL ?: [self tempFileURL];
+    self.videoWriter = [[AVAssetWriter alloc] initWithURL:fileURL
+                                                 fileType:AVFileTypeQuickTimeMovie
+                                                    error:&error];
+    NSParameterAssert(self.videoWriter);
+    [self removeProtectionFromFile:fileURL];
+}
+
+- (void)removeProtectionFromFile:(NSURL *)fileURL {
+    NSError *error = nil;
+    NSDictionary *fileProtectionAttribute = @{
+        NSFileProtectionKey: NSFileProtectionNone,
+    };
+    [self.fileManager setAttributes:fileProtectionAttribute ofItemAtPath:fileURL.path error:&error];
+}
+
+- (void)createVideoWrighterInput {
+    self.videoWriterInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:[self videoSettings]];
+    NSParameterAssert(self.videoWriterInput);
     
-    CGFloat videoQualityBitrateFactor;
-    switch (self.videoQuality) {
-        case ASSScreenRecorderVideoQualityVeryLow: {
-            videoQualityBitrateFactor = 0.5;
-            break;
+    self.videoWriterInput.expectsMediaDataInRealTime = YES;
+    self.videoWriterInput.transform = [self videoTransformForDeviceOrientation];
+}
+
+- (NSDictionary *)videoSettings {
+    static NSDictionary* videoSettings;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        CGFloat videoQualityBitrateFactor;
+        switch (self.videoQuality) {
+            case ASSScreenRecorderVideoQualityVeryLow: {
+                videoQualityBitrateFactor = 0.5;
+                break;
+            }
+            default: {
+                videoQualityBitrateFactor = (CGFloat)self.videoQuality;
+                break;
+            }
         }
-        default: {
-            videoQualityBitrateFactor = (CGFloat)self.videoQuality;
-            break;
-        }
-    }
-    NSInteger pixelNumber = _viewSize.width * _viewSize.height * pow(_scale, 2);
-    NSDictionary* videoCompression = @{
-                                       AVVideoAverageBitRateKey: @(pixelNumber * videoQualityBitrateFactor),
-                                       AVVideoMaxKeyFrameIntervalKey: @(300),
-                                       AVVideoProfileLevelKey: AVVideoProfileLevelH264BaselineAutoLevel,
-                                       AVVideoExpectedSourceFrameRateKey: @(30),
-                                       AVVideoAverageNonDroppableFrameRateKey: @(30),
-                                       };
-    
-    NSDictionary* videoSettings = @{
-                                    AVVideoCodecKey: AVVideoCodecH264,
-                                    AVVideoWidthKey: [NSNumber numberWithInt:_viewSize.width*_scale],
-                                    AVVideoHeightKey: [NSNumber numberWithInt:_viewSize.height*_scale],
-                                    AVVideoCompressionPropertiesKey: videoCompression,
-                                    };
-    
-    _videoWriterInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:videoSettings];
-    NSParameterAssert(_videoWriterInput);
-    
-    _videoWriterInput.expectsMediaDataInRealTime = YES;
-    _videoWriterInput.transform = [self videoTransformForDeviceOrientation];
-    
-    _avAdaptor = [AVAssetWriterInputPixelBufferAdaptor assetWriterInputPixelBufferAdaptorWithAssetWriterInput:_videoWriterInput sourcePixelBufferAttributes:nil];
-    
-    [_videoWriter addInput:_videoWriterInput];
-    
-    [_videoWriter startWriting];
-    [_videoWriter startSessionAtSourceTime:CMTimeMake(0, 1000)];
+        NSInteger pixelNumber = self.bufferSize.width * self.bufferSize.height;
+        NSDictionary *videoCompression = @{
+            AVVideoAverageBitRateKey: @(pixelNumber * videoQualityBitrateFactor),
+            AVVideoMaxKeyFrameIntervalKey: @(300),
+            AVVideoProfileLevelKey: AVVideoProfileLevelH264BaselineAutoLevel,
+            AVVideoExpectedSourceFrameRateKey: @(30),
+            AVVideoAverageNonDroppableFrameRateKey: @(30),
+        };
+        
+        videoSettings = @{
+            AVVideoCodecKey: AVVideoCodecH264,
+            AVVideoWidthKey: @(self.bufferSize.width),
+            AVVideoHeightKey: @(self.bufferSize.height),
+            AVVideoCompressionPropertiesKey: videoCompression,
+        };
+    });
+    return videoSettings;
 }
 
 - (CGAffineTransform)videoTransformForDeviceOrientation
 {
     CGAffineTransform videoTransform;
-    switch ([UIDevice currentDevice].orientation) {
+    switch (self.device.orientation) {
         case UIDeviceOrientationLandscapeLeft:
             videoTransform = CGAffineTransformMakeRotation(-M_PI_2);
             break;
@@ -188,16 +219,15 @@
 }
 
 - (void)removeVideoFile {
-    [self removeTempFilePath:_videoWriter.outputURL.path];
+    [self removeTempFilePath:self.videoWriter.outputURL.path];
     self.videoURL = nil;
 }
 
 - (void)removeTempFilePath:(NSString*)filePath
 {
-    NSFileManager* fileManager = [NSFileManager defaultManager];
-    if ([fileManager fileExistsAtPath:filePath]) {
+    if ([self.fileManager fileExistsAtPath:filePath]) {
         NSError* error;
-        if ([fileManager removeItemAtPath:filePath error:&error] == NO) {
+        if ([self.fileManager removeItemAtPath:filePath error:&error] == NO) {
             NSLog(@"Could not delete old recording:%@", [error localizedDescription]);
         }
     }
@@ -205,11 +235,11 @@
 
 - (void)completeRecordingSession:(VideoCompletionBlock)completionBlock;
 {
-    dispatch_async(_render_queue, ^{
-        dispatch_sync(_append_pixelBuffer_queue, ^{
+    dispatch_async(self.render_queue, ^{
+        dispatch_sync(self.append_pixelBuffer_queue, ^{
             
-            [_videoWriterInput markAsFinished];
-            [_videoWriter finishWritingWithCompletionHandler:^{
+            [self.videoWriterInput markAsFinished];
+            [self.videoWriter finishWritingWithCompletionHandler:^{
                 
                 void (^completion)(void) = ^() {
                     [self cleanup];
@@ -230,7 +260,7 @@
 
 - (void)storeVideoInAssetsLibraryWithCompletion:(void(^)())completion {
     ALAssetsLibrary *library = [[ALAssetsLibrary alloc] init];
-    [library writeVideoAtPathToSavedPhotosAlbum:_videoWriter.outputURL completionBlock:^(NSURL *assetURL, NSError *error) {
+    [library writeVideoAtPathToSavedPhotosAlbum:self.videoWriter.outputURL completionBlock:^(NSURL *assetURL, NSError *error) {
         if (error) {
             NSLog(@"Error copying video to camera roll:%@", [error localizedDescription]);
         } else {
@@ -248,93 +278,144 @@
     self.videoWriter = nil;
     self.firstTimeStamp = 0;
     self.outputBufferPoolAuxAttributes = nil;
-    CGColorSpaceRelease(_rgbColorSpace);
-    CVPixelBufferPoolRelease(_outputBufferPool);
+    CGColorSpaceRelease(self.rgbColorSpace);
+    CVPixelBufferPoolRelease(self.outputBufferPool);
 }
+
+#pragma mark - Recording
 
 - (void)writeVideoFrame
 {
     // throttle the number of frames to prevent meltdown
     // technique gleaned from Brad Larson's answer here: http://stackoverflow.com/a/5956119
-    if (dispatch_semaphore_wait(_frameRenderingSemaphore, DISPATCH_TIME_NOW) != 0) {
+    if (dispatch_semaphore_wait(self.frameRenderingSemaphore, DISPATCH_TIME_NOW) != 0) {
         return;
     }
-    dispatch_async(_render_queue, ^{
-        if (![_videoWriterInput isReadyForMoreMediaData]) return;
-        
-        if (!self.firstTimeStamp) {
-            self.firstTimeStamp = _displayLink.timestamp;
+    
+    dispatch_async(self.render_queue, ^{
+        if (![self.videoWriterInput isReadyForMoreMediaData]) {
+            return;
         }
-        CFTimeInterval elapsed = (_displayLink.timestamp - self.firstTimeStamp);
-        CMTime time = CMTimeMakeWithSeconds(elapsed, 1000);
+        
+        CMTime time = [self currentFrameTime];
         
         CVPixelBufferRef pixelBuffer = NULL;
         CGContextRef bitmapContext = [self createPixelBufferAndBitmapContext:&pixelBuffer];
         
-        if (self.delegate) {
-            [self.delegate writeBackgroundFrameInContext:&bitmapContext];
-        }
-        // draw each window into the context (other windows include UIKeyboard, UIAlert)
-        // FIX: UIKeyboard is currently only rendered correctly in portrait orientation
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            UIGraphicsPushContext(bitmapContext); {
-                for (UIWindow *window in [[UIApplication sharedApplication] windows]) {
-                    if ([window isHidden]) {
-                        continue;
-                    }
-                    if ([window respondsToSelector:@selector(drawViewHierarchyInRect:afterScreenUpdates:)]) {
-                        [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:NO];
-                    } else {
-                        CALayer *rootLayer = window.rootViewController.view.layer;
-                        [rootLayer renderInContext:bitmapContext];
-                    }
-                }
-            } UIGraphicsPopContext();
-        });
+        [self drawInBitmapContext:bitmapContext];
         
         // append pixelBuffer on a async dispatch_queue, the next frame is rendered whilst this one appends
         // must not overwhelm the queue with pixelBuffers, therefore:
         // check if _append_pixelBuffer_queue is ready
         // if it’s not ready, release pixelBuffer and bitmapContext
-        if (dispatch_semaphore_wait(_pixelAppendSemaphore, DISPATCH_TIME_NOW) == 0) {
-            dispatch_async(_append_pixelBuffer_queue, ^{
-                BOOL success = [_avAdaptor appendPixelBuffer:pixelBuffer withPresentationTime:time];
-                if (!success) {
-                    NSLog(@"Warning: Unable to write buffer to video");
-                }
-                CGContextRelease(bitmapContext);
-                CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
-                CVPixelBufferRelease(pixelBuffer);
-                
-                dispatch_semaphore_signal(_pixelAppendSemaphore);
+        if (dispatch_semaphore_wait(self.pixelAppendSemaphore, DISPATCH_TIME_NOW) == 0 && pixelBuffer != NULL) {
+            dispatch_async(self.append_pixelBuffer_queue, ^{
+                [self handlePixelBuffer:pixelBuffer withPresentationTime:time];
+                [self cleanupBitmapContext:bitmapContext andPixelBuffer:pixelBuffer];
+                dispatch_semaphore_signal(self.pixelAppendSemaphore);
             });
         } else {
-            CGContextRelease(bitmapContext);
-            CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
-            CVPixelBufferRelease(pixelBuffer);
+            [self cleanupBitmapContext:bitmapContext andPixelBuffer:pixelBuffer];
         }
+        
         
         dispatch_semaphore_signal(_frameRenderingSemaphore);
     });
 }
 
+#pragma mark - Recording helpers
+
+- (CMTime)currentFrameTime {
+    if (!self.firstTimeStamp) {
+        self.firstTimeStamp = self.displayLink.timestamp;
+    }
+    CFTimeInterval elapsed = (self.displayLink.timestamp - self.firstTimeStamp);
+    return CMTimeMakeWithSeconds(elapsed, 1000);
+}
+
 - (CGContextRef)createPixelBufferAndBitmapContext:(CVPixelBufferRef *)pixelBuffer
 {
-    CVPixelBufferPoolCreatePixelBuffer(NULL, _outputBufferPool, pixelBuffer);
+    CVPixelBufferPoolCreatePixelBuffer(NULL, self.outputBufferPool, pixelBuffer);
     CVPixelBufferLockBaseAddress(*pixelBuffer, 0);
     
     CGContextRef bitmapContext = NULL;
     bitmapContext = CGBitmapContextCreate(CVPixelBufferGetBaseAddress(*pixelBuffer),
                                           CVPixelBufferGetWidth(*pixelBuffer),
                                           CVPixelBufferGetHeight(*pixelBuffer),
-                                          8, CVPixelBufferGetBytesPerRow(*pixelBuffer), _rgbColorSpace,
+                                          8, CVPixelBufferGetBytesPerRow(*pixelBuffer), self.rgbColorSpace,
                                           kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst
                                           );
-    CGContextScaleCTM(bitmapContext, _scale, _scale);
-    CGAffineTransform flipVertical = CGAffineTransformMake(1, 0, 0, -1, 0, _viewSize.height);
+    CGFloat scale = self.screen.scale;
+    CGSize viewSize = self.application.delegate.window.bounds.size;
+    CGContextScaleCTM(bitmapContext, scale, scale);
+    CGAffineTransform flipVertical = CGAffineTransformMake(1, 0, 0, -1, 0, viewSize.height);
     CGContextConcatCTM(bitmapContext, flipVertical);
     
     return bitmapContext;
+}
+
+- (void)drawInBitmapContext:(CGContextRef)bitmapContext {
+    if (self.application.applicationState == UIApplicationStateActive) {
+        if (self.delegate) {
+            [self.delegate writeBackgroundFrameInContext:&bitmapContext];
+        }
+        [self drawCurrentScreenInBitmapContext:bitmapContext];
+    } else {
+        [self drawBackgroundLayerInBitmapContext:bitmapContext];
+    }
+}
+
+- (void)drawCurrentScreenInBitmapContext:(CGContextRef)bitmapContext {
+    // draw each window into the context (other windows include UIKeyboard, UIAlert)
+    // FIX: UIKeyboard is currently only rendered correctly in portrait orientation
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        UIGraphicsPushContext(bitmapContext); {
+            for (UIWindow *window in [self.application windows]) {
+                if ([window isHidden]) {
+                    continue;
+                }
+                if ([window respondsToSelector:@selector(drawViewHierarchyInRect:afterScreenUpdates:)]) {
+                    [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:NO];
+                } else {
+                    CALayer *rootLayer = window.rootViewController.view.layer;
+                    [rootLayer renderInContext:bitmapContext];
+                }
+            }
+        } UIGraphicsPopContext();
+    });
+}
+
+- (UILabel *)prepareBackgroundLabel {
+    CGRect labelRect = self.application.delegate.window.bounds;
+    UILabel *backgroundLabel = [[UILabel alloc] initWithFrame:labelRect];
+    backgroundLabel.backgroundColor = [UIColor blackColor];
+    backgroundLabel.textColor = [UIColor whiteColor];
+    backgroundLabel.textAlignment = NSTextAlignmentCenter;
+    backgroundLabel.numberOfLines = 0;
+    backgroundLabel.text = @"Application did enter background";
+    return backgroundLabel;
+}
+
+- (void)drawBackgroundLayerInBitmapContext:(CGContextRef)bitmapContext {
+    static UILabel *backgroundLabel;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        backgroundLabel = [self prepareBackgroundLabel];
+    });
+    [backgroundLabel.layer renderInContext:bitmapContext];
+}
+
+- (void)handlePixelBuffer:(CVPixelBufferRef)pixelBuffer withPresentationTime:(CMTime)time {
+    BOOL success = [self.avAdaptor appendPixelBuffer:pixelBuffer withPresentationTime:time];
+    if (!success) {
+        NSLog(@"Warning: Unable to write buffer to video");
+    }
+}
+
+- (void)cleanupBitmapContext:(CGContextRef)bitmapContext andPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+    CGContextRelease(bitmapContext);
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+    CVPixelBufferRelease(pixelBuffer);
 }
 
 @end
