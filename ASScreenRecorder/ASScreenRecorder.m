@@ -12,26 +12,25 @@
 #import <AssetsLibrary/AssetsLibrary.h>
 
 @interface ASScreenRecorder()
-@property (strong, nonatomic) AVAssetWriter *videoWriter;
-@property (strong, nonatomic) AVAssetWriterInput *videoWriterInput;
-@property (strong, nonatomic) AVAssetWriterInputPixelBufferAdaptor *avAdaptor;
-@property (strong, nonatomic) CADisplayLink *displayLink;
-@property (strong, nonatomic) NSDictionary *outputBufferPoolAuxAttributes;
-@property (nonatomic) CFTimeInterval firstTimeStamp;
-@property (nonatomic, readwrite) BOOL isRecording;
-@property (nonatomic) CGSize bufferSize;
+
+@property(strong, nonatomic) AVAssetWriter *videoWriter;
+@property(strong, nonatomic) AVAssetWriterInput *videoWriterInput;
+@property(strong, nonatomic) AVAssetWriterInputPixelBufferAdaptor *avAdaptor;
+@property(strong, nonatomic) CADisplayLink *displayLink;
+@property(strong, nonatomic) NSDictionary *outputBufferPoolAuxAttributes;
+@property(nonatomic) CFTimeInterval firstTimeStamp;
+@property(nonatomic, readwrite) BOOL isRecording;
+@property(nonatomic) CGSize bufferSize;
+@property(nonatomic) dispatch_queue_t render_queue;
+@property(nonatomic) dispatch_queue_t append_pixelBuffer_queue;
+@property(nonatomic) dispatch_semaphore_t frameRenderingSemaphore;
+@property(nonatomic) dispatch_semaphore_t pixelAppendSemaphore;
+@property(nonatomic) CGColorSpaceRef rgbColorSpace;
+@property(nonatomic) CVPixelBufferPoolRef outputBufferPool;
+
 @end
 
 @implementation ASScreenRecorder
-{
-    dispatch_queue_t _render_queue;
-    dispatch_queue_t _append_pixelBuffer_queue;
-    dispatch_semaphore_t _frameRenderingSemaphore;
-    dispatch_semaphore_t _pixelAppendSemaphore;
-    
-    CGColorSpaceRef _rgbColorSpace;
-    CVPixelBufferPoolRef _outputBufferPool;
-}
 
 #pragma mark - initializers
 
@@ -263,79 +262,106 @@
     CVPixelBufferPoolRelease(_outputBufferPool);
 }
 
+#pragma mark - Recording
+
 - (void)writeVideoFrame
 {
     // throttle the number of frames to prevent meltdown
     // technique gleaned from Brad Larson's answer here: http://stackoverflow.com/a/5956119
-    if (dispatch_semaphore_wait(_frameRenderingSemaphore, DISPATCH_TIME_NOW) != 0) {
+    if (dispatch_semaphore_wait(self.frameRenderingSemaphore, DISPATCH_TIME_NOW) != 0) {
         return;
     }
-    dispatch_async(_render_queue, ^{
-        if (![_videoWriterInput isReadyForMoreMediaData]) return;
-        
-        if (!self.firstTimeStamp) {
-            self.firstTimeStamp = _displayLink.timestamp;
+    
+    dispatch_async(self.render_queue, ^{
+        if (![self.videoWriterInput isReadyForMoreMediaData]) {
+            return;
         }
-        CFTimeInterval elapsed = (_displayLink.timestamp - self.firstTimeStamp);
-        CMTime time = CMTimeMakeWithSeconds(elapsed, 1000);
+        
+        CMTime time = [self currentFrameTime];
         
         CVPixelBufferRef pixelBuffer = NULL;
         CGContextRef bitmapContext = [self createPixelBufferAndBitmapContext:&pixelBuffer];
         
-        if (self.application.applicationState == UIApplicationStateActive) {
-            if (self.delegate) {
-                [self.delegate writeBackgroundFrameInContext:&bitmapContext];
-            }
-            // draw each window into the context (other windows include UIKeyboard, UIAlert)
-            // FIX: UIKeyboard is currently only rendered correctly in portrait orientation
-            dispatch_sync(dispatch_get_main_queue(), ^{
-                UIGraphicsPushContext(bitmapContext); {
-                    for (UIWindow *window in [self.application windows]) {
-                        if ([window isHidden]) {
-                            continue;
-                        }
-                        if ([window respondsToSelector:@selector(drawViewHierarchyInRect:afterScreenUpdates:)]) {
-                            [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:NO];
-                        } else {
-                            CALayer *rootLayer = window.rootViewController.view.layer;
-                            [rootLayer renderInContext:bitmapContext];
-                        }
-                    }
-                } UIGraphicsPopContext();
-            });
-        } else {
-            static UILabel *backgroundLabel;
-            static dispatch_once_t onceToken;
-            dispatch_once(&onceToken, ^{
-                backgroundLabel = [self prepareBackgroundLabel];
-            });
-            [backgroundLabel.layer renderInContext:bitmapContext];
-        }
+        [self drawInBitmapContext:bitmapContext];
         
         // append pixelBuffer on a async dispatch_queue, the next frame is rendered whilst this one appends
         // must not overwhelm the queue with pixelBuffers, therefore:
         // check if _append_pixelBuffer_queue is ready
         // if it’s not ready, release pixelBuffer and bitmapContext
-        if (dispatch_semaphore_wait(_pixelAppendSemaphore, DISPATCH_TIME_NOW) == 0 && pixelBuffer != NULL) {
-            dispatch_async(_append_pixelBuffer_queue, ^{
-                BOOL success = [_avAdaptor appendPixelBuffer:pixelBuffer withPresentationTime:time];
-                if (!success) {
-                    NSLog(@"Warning: Unable to write buffer to video");
-                }
-                CGContextRelease(bitmapContext);
-                CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
-                CVPixelBufferRelease(pixelBuffer);
-                
-                dispatch_semaphore_signal(_pixelAppendSemaphore);
+        if (dispatch_semaphore_wait(self.pixelAppendSemaphore, DISPATCH_TIME_NOW) == 0 && pixelBuffer != NULL) {
+            dispatch_async(self.append_pixelBuffer_queue, ^{
+                [self handlePixelBuffer:pixelBuffer withPresentationTime:time];
+                [self cleanupBitmapContext:bitmapContext andPixelBuffer:pixelBuffer];
+                dispatch_semaphore_signal(self.pixelAppendSemaphore);
             });
         } else {
-            CGContextRelease(bitmapContext);
-            CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
-            CVPixelBufferRelease(pixelBuffer);
+            [self cleanupBitmapContext:bitmapContext andPixelBuffer:pixelBuffer];
         }
         
         
         dispatch_semaphore_signal(_frameRenderingSemaphore);
+    });
+}
+
+#pragma mark - Recording helpers
+
+- (CMTime)currentFrameTime {
+    if (!self.firstTimeStamp) {
+        self.firstTimeStamp = self.displayLink.timestamp;
+    }
+    CFTimeInterval elapsed = (self.displayLink.timestamp - self.firstTimeStamp);
+    return CMTimeMakeWithSeconds(elapsed, 1000);
+}
+
+- (CGContextRef)createPixelBufferAndBitmapContext:(CVPixelBufferRef *)pixelBuffer
+{
+    CVPixelBufferPoolCreatePixelBuffer(NULL, self.outputBufferPool, pixelBuffer);
+    CVPixelBufferLockBaseAddress(*pixelBuffer, 0);
+    
+    CGContextRef bitmapContext = NULL;
+    bitmapContext = CGBitmapContextCreate(CVPixelBufferGetBaseAddress(*pixelBuffer),
+                                          CVPixelBufferGetWidth(*pixelBuffer),
+                                          CVPixelBufferGetHeight(*pixelBuffer),
+                                          8, CVPixelBufferGetBytesPerRow(*pixelBuffer), self.rgbColorSpace,
+                                          kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst
+                                          );
+    CGFloat scale = self.screen.scale;
+    CGSize viewSize = self.application.delegate.window.bounds.size;
+    CGContextScaleCTM(bitmapContext, scale, scale);
+    CGAffineTransform flipVertical = CGAffineTransformMake(1, 0, 0, -1, 0, viewSize.height);
+    CGContextConcatCTM(bitmapContext, flipVertical);
+    
+    return bitmapContext;
+}
+
+- (void)drawInBitmapContext:(CGContextRef)bitmapContext {
+    if (self.application.applicationState == UIApplicationStateActive) {
+        if (self.delegate) {
+            [self.delegate writeBackgroundFrameInContext:&bitmapContext];
+        }
+        [self drawCurrentScreenInBitmapContext:bitmapContext];
+    } else {
+        [self drawBackgroundLayerInBitmapContext:bitmapContext];
+    }
+}
+
+- (void)drawCurrentScreenInBitmapContext:(CGContextRef)bitmapContext {
+    // draw each window into the context (other windows include UIKeyboard, UIAlert)
+    // FIX: UIKeyboard is currently only rendered correctly in portrait orientation
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        UIGraphicsPushContext(bitmapContext); {
+            for (UIWindow *window in [self.application windows]) {
+                if ([window isHidden]) {
+                    continue;
+                }
+                if ([window respondsToSelector:@selector(drawViewHierarchyInRect:afterScreenUpdates:)]) {
+                    [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:NO];
+                } else {
+                    CALayer *rootLayer = window.rootViewController.view.layer;
+                    [rootLayer renderInContext:bitmapContext];
+                }
+            }
+        } UIGraphicsPopContext();
     });
 }
 
@@ -350,25 +376,26 @@
     return backgroundLabel;
 }
 
-- (CGContextRef)createPixelBufferAndBitmapContext:(CVPixelBufferRef *)pixelBuffer
-{
-    CVPixelBufferPoolCreatePixelBuffer(NULL, _outputBufferPool, pixelBuffer);
-    CVPixelBufferLockBaseAddress(*pixelBuffer, 0);
-    
-    CGContextRef bitmapContext = NULL;
-    bitmapContext = CGBitmapContextCreate(CVPixelBufferGetBaseAddress(*pixelBuffer),
-                                          CVPixelBufferGetWidth(*pixelBuffer),
-                                          CVPixelBufferGetHeight(*pixelBuffer),
-                                          8, CVPixelBufferGetBytesPerRow(*pixelBuffer), _rgbColorSpace,
-                                          kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst
-                                          );
-    CGFloat scale = self.screen.scale;
-    CGSize viewSize = self.application.delegate.window.bounds.size;
-    CGContextScaleCTM(bitmapContext, scale, scale);
-    CGAffineTransform flipVertical = CGAffineTransformMake(1, 0, 0, -1, 0, viewSize.height);
-    CGContextConcatCTM(bitmapContext, flipVertical);
-    
-    return bitmapContext;
+- (void)drawBackgroundLayerInBitmapContext:(CGContextRef)bitmapContext {
+    static UILabel *backgroundLabel;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        backgroundLabel = [self prepareBackgroundLabel];
+    });
+    [backgroundLabel.layer renderInContext:bitmapContext];
+}
+
+- (void)handlePixelBuffer:(CVPixelBufferRef)pixelBuffer withPresentationTime:(CMTime)time {
+    BOOL success = [self.avAdaptor appendPixelBuffer:pixelBuffer withPresentationTime:time];
+    if (!success) {
+        NSLog(@"Warning: Unable to write buffer to video");
+    }
+}
+
+- (void)cleanupBitmapContext:(CGContextRef)bitmapContext andPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+    CGContextRelease(bitmapContext);
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+    CVPixelBufferRelease(pixelBuffer);
 }
 
 @end
