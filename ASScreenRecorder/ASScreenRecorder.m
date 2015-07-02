@@ -19,6 +19,7 @@
 @property (strong, nonatomic) NSDictionary *outputBufferPoolAuxAttributes;
 @property (nonatomic) CFTimeInterval firstTimeStamp;
 @property (nonatomic) BOOL isRecording;
+@property (nonatomic) CGSize bufferSize;
 @end
 
 @implementation ASScreenRecorder
@@ -27,9 +28,6 @@
     dispatch_queue_t _append_pixelBuffer_queue;
     dispatch_semaphore_t _frameRenderingSemaphore;
     dispatch_semaphore_t _pixelAppendSemaphore;
-    
-    CGSize _viewSize;
-    CGFloat _scale;
     
     CGColorSpaceRef _rgbColorSpace;
     CVPixelBufferPoolRef _outputBufferPool;
@@ -51,8 +49,9 @@
     self = [super init];
     if (self) {
         _videoQuality = ASSScreenRecorderVideoQualityMedium;
-        _viewSize = [UIApplication sharedApplication].delegate.window.bounds.size;
-        _scale = [UIScreen mainScreen].scale;
+        CGSize viewSize = [UIApplication sharedApplication].delegate.window.bounds.size;
+        CGFloat scale = [UIScreen mainScreen].scale;
+        _bufferSize = CGSizeMake(viewSize.width * scale, viewSize.height * scale);
         _isRecording = NO;
         
         _append_pixelBuffer_queue = dispatch_queue_create("ASScreenRecorder.append_queue", DISPATCH_QUEUE_SERIAL);
@@ -105,9 +104,9 @@
     
     NSDictionary *bufferAttributes = @{(id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
                                        (id)kCVPixelBufferCGBitmapContextCompatibilityKey : @YES,
-                                       (id)kCVPixelBufferWidthKey : @(_viewSize.width * _scale),
-                                       (id)kCVPixelBufferHeightKey : @(_viewSize.height * _scale),
-                                       (id)kCVPixelBufferBytesPerRowAlignmentKey : @(_viewSize.width * _scale * 4)
+                                       (id)kCVPixelBufferWidthKey : @(self.bufferSize.width),
+                                       (id)kCVPixelBufferHeightKey : @(self.bufferSize.height),
+                                       (id)kCVPixelBufferBytesPerRowAlignmentKey : @(self.bufferSize.width * 4)
                                        };
     
     _outputBufferPool = NULL;
@@ -137,7 +136,7 @@
             break;
         }
     }
-    NSInteger pixelNumber = _viewSize.width * _viewSize.height * pow(_scale, 2);
+    NSInteger pixelNumber = self.bufferSize.width * self.bufferSize.height;
     NSDictionary* videoCompression = @{
                                        AVVideoAverageBitRateKey: @(pixelNumber * videoQualityBitrateFactor),
                                        AVVideoMaxKeyFrameIntervalKey: @(300),
@@ -148,8 +147,8 @@
     
     NSDictionary* videoSettings = @{
                                     AVVideoCodecKey: AVVideoCodecH264,
-                                    AVVideoWidthKey: [NSNumber numberWithInt:_viewSize.width*_scale],
-                                    AVVideoHeightKey: [NSNumber numberWithInt:_viewSize.height*_scale],
+                                    AVVideoWidthKey: @(self.bufferSize.width),
+                                    AVVideoHeightKey: @(self.bufferSize.height),
                                     AVVideoCompressionPropertiesKey: videoCompression,
                                     };
     
@@ -260,9 +259,6 @@
 
 - (void)writeVideoFrame
 {
-    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
-        return;
-    }
     // throttle the number of frames to prevent meltdown
     // technique gleaned from Brad Larson's answer here: http://stackoverflow.com/a/5956119
     if (dispatch_semaphore_wait(_frameRenderingSemaphore, DISPATCH_TIME_NOW) != 0) {
@@ -280,32 +276,41 @@
         CVPixelBufferRef pixelBuffer = NULL;
         CGContextRef bitmapContext = [self createPixelBufferAndBitmapContext:&pixelBuffer];
         
-        if (self.delegate) {
-            [self.delegate writeBackgroundFrameInContext:&bitmapContext];
+        if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
+            if (self.delegate) {
+                [self.delegate writeBackgroundFrameInContext:&bitmapContext];
+            }
+            // draw each window into the context (other windows include UIKeyboard, UIAlert)
+            // FIX: UIKeyboard is currently only rendered correctly in portrait orientation
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                UIGraphicsPushContext(bitmapContext); {
+                    for (UIWindow *window in [[UIApplication sharedApplication] windows]) {
+                        if ([window isHidden]) {
+                            continue;
+                        }
+                        if ([window respondsToSelector:@selector(drawViewHierarchyInRect:afterScreenUpdates:)]) {
+                            [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:NO];
+                        } else {
+                            CALayer *rootLayer = window.rootViewController.view.layer;
+                            [rootLayer renderInContext:bitmapContext];
+                        }
+                    }
+                } UIGraphicsPopContext();
+            });
+        } else {
+            static UILabel *backgroundLabel;
+            static dispatch_once_t onceToken;
+            dispatch_once(&onceToken, ^{
+                backgroundLabel = [self prepareBackgroundLabel];
+            });
+            [backgroundLabel.layer renderInContext:bitmapContext];
         }
-        // draw each window into the context (other windows include UIKeyboard, UIAlert)
-        // FIX: UIKeyboard is currently only rendered correctly in portrait orientation
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            UIGraphicsPushContext(bitmapContext); {
-                for (UIWindow *window in [[UIApplication sharedApplication] windows]) {
-                    if ([window isHidden]) {
-                        continue;
-                    }
-                    if ([window respondsToSelector:@selector(drawViewHierarchyInRect:afterScreenUpdates:)]) {
-                        [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:NO];
-                    } else {
-                        CALayer *rootLayer = window.rootViewController.view.layer;
-                        [rootLayer renderInContext:bitmapContext];
-                    }
-                }
-            } UIGraphicsPopContext();
-        });
         
         // append pixelBuffer on a async dispatch_queue, the next frame is rendered whilst this one appends
         // must not overwhelm the queue with pixelBuffers, therefore:
         // check if _append_pixelBuffer_queue is ready
         // if it’s not ready, release pixelBuffer and bitmapContext
-        if (dispatch_semaphore_wait(_pixelAppendSemaphore, DISPATCH_TIME_NOW) == 0) {
+        if (dispatch_semaphore_wait(_pixelAppendSemaphore, DISPATCH_TIME_NOW) == 0 && pixelBuffer != NULL) {
             dispatch_async(_append_pixelBuffer_queue, ^{
                 BOOL success = [_avAdaptor appendPixelBuffer:pixelBuffer withPresentationTime:time];
                 if (!success) {
@@ -323,8 +328,20 @@
             CVPixelBufferRelease(pixelBuffer);
         }
         
+        
         dispatch_semaphore_signal(_frameRenderingSemaphore);
     });
+}
+
+- (UILabel *)prepareBackgroundLabel {
+    CGRect labelRect = [UIApplication sharedApplication].delegate.window.bounds;
+    UILabel *backgroundLabel = [[UILabel alloc] initWithFrame:labelRect];
+    backgroundLabel.backgroundColor = [UIColor blackColor];
+    backgroundLabel.textColor = [UIColor whiteColor];
+    backgroundLabel.textAlignment = NSTextAlignmentCenter;
+    backgroundLabel.numberOfLines = 0;
+    backgroundLabel.text = @"Application did enter background";
+    return backgroundLabel;
 }
 
 - (CGContextRef)createPixelBufferAndBitmapContext:(CVPixelBufferRef *)pixelBuffer
@@ -339,8 +356,10 @@
                                           8, CVPixelBufferGetBytesPerRow(*pixelBuffer), _rgbColorSpace,
                                           kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst
                                           );
-    CGContextScaleCTM(bitmapContext, _scale, _scale);
-    CGAffineTransform flipVertical = CGAffineTransformMake(1, 0, 0, -1, 0, _viewSize.height);
+    CGFloat scale = [UIScreen mainScreen].scale;
+    CGSize viewSize = [UIApplication sharedApplication].delegate.window.bounds.size;
+    CGContextScaleCTM(bitmapContext, scale, scale);
+    CGAffineTransform flipVertical = CGAffineTransformMake(1, 0, 0, -1, 0, viewSize.height);
     CGContextConcatCTM(bitmapContext, flipVertical);
     
     return bitmapContext;
