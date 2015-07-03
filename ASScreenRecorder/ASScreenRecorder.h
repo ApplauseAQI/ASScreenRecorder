@@ -7,6 +7,7 @@
 //
 
 #import <Foundation/Foundation.h>
+#import <AVFoundation/AVFoundation.h>
 
 typedef NS_ENUM(NSUInteger, ASSScreenRecorderVideoQuality) {
     ASSScreenRecorderVideoQualityVeryLow = 0,
@@ -18,6 +19,7 @@ typedef NS_ENUM(NSUInteger, ASSScreenRecorderVideoQuality) {
 
 typedef void (^VideoCompletionBlock)(void);
 
+@protocol ASScreenRecorderDataSource;
 @protocol ASScreenRecorderDelegate;
 
 @interface ASScreenRecorder : NSObject
@@ -26,8 +28,8 @@ typedef void (^VideoCompletionBlock)(void);
 
 @property (nonatomic) ASSScreenRecorderVideoQuality videoQuality;
 
-// delegate is only required when implementing ASScreenRecorderDelegate - see below
 @property (nonatomic, weak) id <ASScreenRecorderDelegate> delegate;
+@property (nonatomic, weak) id <ASScreenRecorderDataSource> dataSource;
 
 // this property can not be changed whilst recording is in progress
 @property (strong, nonatomic) NSURL *videoURL;
@@ -53,10 +55,17 @@ typedef void (^VideoCompletionBlock)(void);
 // If your view contains an AVCaptureVideoPreviewLayer or an openGL view
 // you'll need to write that data into the CGContextRef yourself.
 // In the viewcontroller responsible for the AVCaptureVideoPreviewLayer / openGL view
-// set yourself as the delegate for ASScreenRecorder.
-// [ASScreenRecorder sharedInstance].delegate = self
-// Then implement 'writeBackgroundFrameInContext:(CGContextRef*)contextRef'
+// set yourself as the dataSource for ASScreenRecorder.
+// [ASScreenRecorder sharedInstance].dataSource = self
+// Then implement 'screenRecorder:requestToDrawInContext:'
 // use 'CGContextDrawImage' to draw your view into the provided CGContextRef
+@protocol ASScreenRecorderDataSource <NSObject>
+- (void)screenRecorder:(ASScreenRecorder *)screenRecorder requestToDrawInContext:(CGContextRef*)contextRef;
+- (NSString *)screenRecorderTextForBackgroundFrame:(ASScreenRecorder *)screenRecorder;
+@end
+
 @protocol ASScreenRecorderDelegate <NSObject>
-- (void)writeBackgroundFrameInContext:(CGContextRef*)contextRef;
+- (void)screenRecorder:(ASScreenRecorder *)screenRecorder didFailToWriteBufferToVideoWriter:(AVAssetWriter *)assetWriter withError:(NSError *)error;
+- (void)screenRecorder:(ASScreenRecorder *)screenRecorder didFailToRemoveFileAtPath:(NSURL *)videoFilePath withError:(NSError *)error;
+- (void)screenRecorder:(ASScreenRecorder *)screenRecorder didFailToSaveVideoToCameraRoll:(NSURL *)videoFilePath withError:(NSError *)error;
 @end
