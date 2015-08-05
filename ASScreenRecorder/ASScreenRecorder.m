@@ -178,7 +178,9 @@
             AVVideoMaxKeyFrameIntervalKey: @(300),
             AVVideoProfileLevelKey: AVVideoProfileLevelH264BaselineAutoLevel,
             AVVideoExpectedSourceFrameRateKey: @(30),
+#if !(TARGET_IPHONE_SIMULATOR)
             AVVideoAverageNonDroppableFrameRateKey: @(30),
+#endif
         };
         
         videoSettings = @{
