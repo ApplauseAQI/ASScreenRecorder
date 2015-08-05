@@ -154,7 +154,9 @@
     NSParameterAssert(self.videoWriterInput);
     
     self.videoWriterInput.expectsMediaDataInRealTime = YES;
-    self.videoWriterInput.transform = [self videoTransformForDeviceOrientation];
+    if ([[[UIDevice currentDevice] systemVersion] floatValue] < 8.0) {
+        self.videoWriterInput.transform = [self videoTransformForDeviceOrientation];
+    }
 }
 
 - (NSDictionary *)videoSettings {
