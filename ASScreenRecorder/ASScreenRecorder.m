@@ -373,7 +373,7 @@
     // FIX: UIKeyboard is currently only rendered correctly in portrait orientation
     dispatch_sync(dispatch_get_main_queue(), ^{
         UIGraphicsPushContext(bitmapContext); {
-            for (UIWindow *window in [self.application windows]) {
+            for (UIWindow *window in [self windowsToRender]) {
                 if ([window isHidden]) {
                     continue;
                 }
@@ -386,6 +386,20 @@
             }
         } UIGraphicsPopContext();
     });
+}
+
+- (NSArray *)windowsToRender {
+    return [self appendKeyWindowIfNeeded:[self.application windows]];
+}
+
+- (NSArray *)appendKeyWindowIfNeeded:(NSArray *)visibleWindows {
+    UIWindow *keyWindow = [self.application keyWindow];
+    if (keyWindow != nil && ![visibleWindows containsObject:keyWindow]) {
+        NSMutableArray *tempWindowsArray = [NSMutableArray arrayWithArray:visibleWindows];
+        [tempWindowsArray addObject:keyWindow];
+        visibleWindows = tempWindowsArray;
+    }
+    return visibleWindows;
 }
 
 - (UILabel *)prepareBackgroundLabel {
