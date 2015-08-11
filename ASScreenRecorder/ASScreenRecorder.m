@@ -103,7 +103,7 @@
 
 #pragma mark - private
 
--(void)setUpWriter
+- (void)setUpWriter
 {
     self.rgbColorSpace = CGColorSpaceCreateDeviceRGB();
     
@@ -154,9 +154,7 @@
     NSParameterAssert(self.videoWriterInput);
     
     self.videoWriterInput.expectsMediaDataInRealTime = YES;
-    if ([[[UIDevice currentDevice] systemVersion] floatValue] < 8.0) {
-        self.videoWriterInput.transform = [self videoTransformForDeviceOrientation];
-    }
+    self.videoWriterInput.transform = [self videoTransformForDeviceOrientation];
 }
 
 - (NSDictionary *)videoSettings {
@@ -174,16 +172,26 @@
                 break;
             }
         }
+        NSString *videoProfileLevel;
+        if ([[[UIDevice currentDevice] systemVersion] floatValue] >= 7.0) {
+            videoProfileLevel = AVVideoProfileLevelH264BaselineAutoLevel;
+        } else {
+            videoProfileLevel = AVVideoProfileLevelH264Baseline41;
+        }
         NSInteger pixelNumber = self.bufferSize.width * self.bufferSize.height;
-        NSDictionary *videoCompression = @{
+        NSMutableDictionary *videoCompression = [@{
             AVVideoAverageBitRateKey: @(pixelNumber * videoQualityBitrateFactor),
             AVVideoMaxKeyFrameIntervalKey: @(300),
-            AVVideoProfileLevelKey: AVVideoProfileLevelH264BaselineAutoLevel,
-            AVVideoExpectedSourceFrameRateKey: @(30),
+            AVVideoProfileLevelKey: videoProfileLevel,
+        } mutableCopy];
+        if ([[[UIDevice currentDevice] systemVersion] floatValue] >= 7.0) {
+            [videoCompression addEntriesFromDictionary:@{
+                AVVideoExpectedSourceFrameRateKey: @(30),
 #if !(TARGET_IPHONE_SIMULATOR)
-            AVVideoAverageNonDroppableFrameRateKey: @(30),
+                AVVideoAverageNonDroppableFrameRateKey: @(30),
 #endif
-        };
+            }];
+        }
         
         videoSettings = @{
             AVVideoCodecKey: AVVideoCodecH264,
@@ -352,11 +360,32 @@
                                           );
     CGFloat scale = self.screen.scale;
     CGSize viewSize = self.application.delegate.window.bounds.size;
-    CGContextScaleCTM(bitmapContext, scale, scale);
-    CGAffineTransform flipVertical = CGAffineTransformMake(1, 0, 0, -1, 0, viewSize.height);
-    CGContextConcatCTM(bitmapContext, flipVertical);
+    CGContextScaleCTM(bitmapContext, scale, -scale);
+    CGContextTranslateCTM(bitmapContext, 0, -viewSize.height);
+    
+    [self applyContextTransform:bitmapContext];
     
     return bitmapContext;
+}
+
+- (void)applyContextTransform:(CGContextRef)bitmapContext {
+    CGSize windowSize = self.application.delegate.window.bounds.size;
+    switch ([UIApplication sharedApplication].statusBarOrientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            CGContextRotateCTM(bitmapContext, -M_PI_2);
+            CGContextTranslateCTM(bitmapContext, -windowSize.height, 0);
+            break;
+        case UIInterfaceOrientationLandscapeRight:
+            CGContextRotateCTM(bitmapContext, M_PI_2);
+            CGContextTranslateCTM(bitmapContext, -ABS(windowSize.height - windowSize.width), -windowSize.height);
+            break;
+        case UIInterfaceOrientationPortraitUpsideDown:
+            CGContextRotateCTM(bitmapContext, M_PI);
+            CGContextTranslateCTM(bitmapContext, -windowSize.width, -windowSize.height);
+            break;
+        default:
+            break;
+    }
 }
 
 - (void)drawInBitmapContext:(CGContextRef)bitmapContext {
